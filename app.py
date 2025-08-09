@@ -45,13 +45,14 @@ def image_to_svg_simple(image_path, output_path, threshold=128):
             if img.mode != 'L':
                 img = img.convert('L')
             
-            # Resize for performance (max 300x300 for free hosting)
-            max_size = (300, 300)
+            # Resize for performance (increased for better quality)
+            max_size = (600, 600)
             original_size = img.size
             if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
                 img.thumbnail(max_size, Image.Resampling.LANCZOS)
             
-            # Apply threshold to create binary image
+            # Apply threshold with better edge detection
+            threshold = 140  # Better threshold value
             img = img.point(lambda x: 255 if x > threshold else 0, mode='1')
             
             width, height = img.size

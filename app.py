@@ -212,7 +212,7 @@ def upload_file():
         flash(f'Upload failed: {str(e)}')
         return redirect(url_for('index'))
 
-# Your existing beautiful HTML template
+# Updated HTML template with form reset functionality
 TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -425,6 +425,18 @@ TEMPLATE = '''
             font-weight: 600;
         }
         
+        .success-message {
+            display: none;
+            background: rgba(34, 197, 94, 0.1);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            color: #16a34a;
+            padding: 15px 20px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            font-weight: 600;
+            text-align: center;
+        }
+        
         .spinner {
             display: inline-block;
             width: 20px;
@@ -463,6 +475,10 @@ TEMPLATE = '''
                 {% endif %}
             {% endwith %}
             
+            <div class="success-message" id="successMessage">
+                ✅ Conversion successful! Download started. You can upload another file now.
+            </div>
+            
             <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data">
                 <div class="upload-area" id="dropZone" onclick="document.getElementById('fileInput').click()">
                     <div class="upload-icon">📁</div>
@@ -485,6 +501,27 @@ TEMPLATE = '''
         const filePreview = document.getElementById('filePreview');
         const convertBtn = document.getElementById('convertBtn');
         const form = document.getElementById('uploadForm');
+        const successMessage = document.getElementById('successMessage');
+        
+        let originalButtonText = '🚀 Convert to SVG';
+        
+        function resetForm() {
+            // Reset form
+            form.reset();
+            
+            // Hide file preview
+            filePreview.style.display = 'none';
+            filePreview.textContent = '';
+            
+            // Reset button
+            convertBtn.innerHTML = originalButtonText;
+            convertBtn.disabled = false;
+            
+            // Hide success message after a delay
+            setTimeout(() => {
+                successMessage.style.display = 'none';
+            }, 4000);
+        }
         
         fileInput.addEventListener('change', (e) => {
             if (e.target.files[0]) {
@@ -514,9 +551,32 @@ TEMPLATE = '''
             }
         });
         
-        form.addEventListener('submit', () => {
+        form.addEventListener('submit', (e) => {
+            // Show loading state
             convertBtn.innerHTML = '<div class="spinner"></div>Converting...';
             convertBtn.disabled = true;
+            
+            // Set a timer to reset the form after download should have started
+            // This is a reasonable assumption since file downloads typically start quickly
+            setTimeout(() => {
+                // Show success message
+                successMessage.style.display = 'block';
+                
+                // Reset form after a short delay
+                setTimeout(resetForm, 1000);
+            }, 2000); // Wait 2 seconds for download to start
+        });
+        
+        // Alternative approach: detect when user clicks back to the page
+        // This handles cases where the download takes longer
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && convertBtn.disabled) {
+                // User came back to the page, likely after download
+                setTimeout(() => {
+                    successMessage.style.display = 'block';
+                    setTimeout(resetForm, 1000);
+                }, 500);
+            }
         });
     </script>
 </body>

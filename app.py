@@ -151,7 +151,7 @@ def image_to_svg_simple_original(image_path, output_path, threshold=128):
 def image_to_svg_with_color_detection(image_path, output_path, threshold=128):
     """
     Enhanced version that uses original logic for B&W images,
-    and color detection for colored images
+    and improved color detection with smoother curves for colored images
     """
     try:
         # First, check if it's mostly black and white
@@ -159,69 +159,161 @@ def image_to_svg_with_color_detection(image_path, output_path, threshold=128):
             # Use original algorithm (unchanged!)
             return image_to_svg_simple_original(image_path, output_path, threshold)
         
-        # For colored images, use color detection
+        # For colored images, create a cleaner binary image first
         with Image.open(image_path) as img:
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            max_size = (600, 600)
+            # Use higher resolution for better quality (was 600x600, now 800x800)
+            max_size = (800, 800)
             original_size = img.size
             if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
                 img.thumbnail(max_size, Image.Resampling.LANCZOS)
             
             width, height = img.size
-            scale_x = original_size[0] / width
-            scale_y = original_size[1] / height
-            
             pixels = list(img.getdata())
             
-            # Find background color by checking corners
-            corner_pixels = [
-                pixels[0],  # top-left
-                pixels[width-1],  # top-right  
-                pixels[width*(height-1)],  # bottom-left
-                pixels[width*height-1]  # bottom-right
-            ]
+            # Better background detection - check more points
+            sample_points = []
+            # Corners
+            sample_points.extend([
+                pixels[0], pixels[width-1], 
+                pixels[width*(height-1)], pixels[width*height-1]
+            ])
+            # Edge midpoints
+            if width > 1 and height > 1:
+                sample_points.extend([
+                    pixels[width//2],  # top middle
+                    pixels[width*(height-1) + width//2],  # bottom middle
+                    pixels[(height//2)*width],  # left middle  
+                    pixels[(height//2)*width + width-1]  # right middle
+                ])
             
-            # Most common corner color is likely background
-            corner_counts = Counter(corner_pixels)
-            background_color = corner_counts.most_common(1)[0][0]
+            # Find most common background color
+            bg_counts = Counter(sample_points)
+            background_color = bg_counts.most_common(1)[0][0]
             
-            # Create binary mask based on color distance from background
+            # Create binary image with better thresholding
             binary_pixels = []
             for pixel in pixels:
-                # Calculate color distance
+                # Use better color distance calculation
                 distance = ((pixel[0] - background_color[0])**2 + 
                            (pixel[1] - background_color[1])**2 + 
                            (pixel[2] - background_color[2])**2)**0.5
                 
-                if distance > 40:  # Adjust this if needed
-                    binary_pixels.append(0)  # Foreground (black in SVG)
-                else:
-                    binary_pixels.append(255)  # Background (white in SVG)
+                # More sensitive threshold for better edge detection
+                binary_pixels.append(0 if distance > 25 else 255)  # Lowered from 40 to 25
             
-            # Use same rectangle optimization code
+            # Apply simple smoothing to reduce choppiness
+            smoothed_pixels = binary_pixels[:]
+            for y in range(1, height-1):
+                for x in range(1, width-1):
+                    idx = y * width + x
+                    if idx < len(binary_pixels):
+                        # Count black neighbors
+                        neighbors = [
+                            binary_pixels[(y-1)*width + (x-1)],  # top-left
+                            binary_pixels[(y-1)*width + x],      # top
+                            binary_pixels[(y-1)*width + (x+1)],  # top-right
+                            binary_pixels[y*width + (x-1)],      # left
+                            binary_pixels[y*width + (x+1)],      # right
+                            binary_pixels[(y+1)*width + (x-1)],  # bottom-left
+                            binary_pixels[(y+1)*width + x],      # bottom
+                            binary_pixels[(y+1)*width + (x+1)]   # bottom-right
+                        ]
+                        
+                        black_count = sum(1 for n in neighbors if n == 0)
+                        
+                        # Smooth isolated pixels
+                        if binary_pixels[idx] == 0 and black_count < 3:  # Isolated black pixel
+                            smoothed_pixels[idx] = 255
+                        elif binary_pixels[idx] == 255 and black_count > 5:  # Isolated white pixel
+                            smoothed_pixels[idx] = 0
+            
+            # Convert smoothed binary to grayscale PIL image for potrace
+            binary_img = Image.new('L', (width, height))
+            binary_img.putdata(smoothed_pixels)
+            
+            # Try to use potrace on the processed color image for better quality
+            potrace_path = find_potrace()
+            if potrace_path:
+                try:
+                    temp_dir = tempfile.gettempdir()
+                    temp_pbm = os.path.join(temp_dir, f"temp_color_{uuid.uuid4()}.pbm")
+                    
+                    # Save binary image as PBM for potrace
+                    binary_img.save(temp_pbm, format='PPM')
+                    
+                    # Scale output to original size
+                    scale_x = original_size[0] / width
+                    scale_y = original_size[1] / height
+                    
+                    temp_svg = os.path.join(temp_dir, f"temp_color_{uuid.uuid4()}.svg")
+                    cmd = [potrace_path, temp_pbm, '-s', '-o', temp_svg, '--tight']
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                    
+                    if result.returncode == 0 and os.path.exists(temp_svg):
+                        # Read and scale the SVG
+                        with open(temp_svg, 'r') as f:
+                            svg_content = f.read()
+                        
+                        # Update SVG dimensions and viewBox
+                        svg_content = svg_content.replace(
+                            f'width="{width}" height="{height}"',
+                            f'width="{original_size[0]}" height="{original_size[1]}"'
+                        )
+                        svg_content = svg_content.replace(
+                            f'viewBox="0 0 {width} {height}"',
+                            f'viewBox="0 0 {original_size[0]} {original_size[1]}"'
+                        )
+                        
+                        # Add scaling transform if needed
+                        if scale_x != 1.0 or scale_y != 1.0:
+                            svg_content = svg_content.replace(
+                                '<g ',
+                                f'<g transform="scale({scale_x:.3f},{scale_y:.3f})" '
+                            )
+                        
+                        with open(output_path, 'w', encoding='utf-8') as f:
+                            f.write(svg_content)
+                        
+                        # Cleanup
+                        for temp_file in [temp_pbm, temp_svg]:
+                            if os.path.exists(temp_file):
+                                os.remove(temp_file)
+                        
+                        return True, "Success (Color + Potrace)"
+                        
+                except Exception as e:
+                    print(f"Potrace on color image failed: {e}")
+                    # Continue to rectangle fallback
+            
+            # Fallback to rectangle method with better scaling
+            scale_x = original_size[0] / width
+            scale_y = original_size[1] / height
+            
             svg_content = f'''<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="{original_size[0]}" height="{original_size[1]}" viewBox="0 0 {original_size[0]} {original_size[1]}">
 <rect width="{original_size[0]}" height="{original_size[1]}" fill="white"/>
-<g transform="scale({scale_x:.2f},{scale_y:.2f})">
+<g transform="scale({scale_x:.3f},{scale_y:.3f})">
 '''
             
+            # Use the smoothed pixels for rectangle generation
             processed = [[False] * width for _ in range(height)]
             
             for y in range(height):
                 for x in range(width):
                     pixel_index = y * width + x
-                    if (pixel_index < len(binary_pixels) and 
-                        binary_pixels[pixel_index] == 0 and 
+                    if (pixel_index < len(smoothed_pixels) and 
+                        smoothed_pixels[pixel_index] == 0 and 
                         not processed[y][x]):
                         
                         rect_width = 1
                         rect_height = 1
                         
                         while (x + rect_width < width and 
-                               (y * width + x + rect_width) < len(binary_pixels) and
-                               binary_pixels[y * width + x + rect_width] == 0 and
+                               (y * width + x + rect_width) < len(smoothed_pixels) and
+                               smoothed_pixels[y * width + x + rect_width] == 0 and
                                not processed[y][x + rect_width]):
                             rect_width += 1
                         
@@ -229,8 +321,8 @@ def image_to_svg_with_color_detection(image_path, output_path, threshold=128):
                         while (y + rect_height < height and can_expand_height):
                             for dx in range(rect_width):
                                 pixel_idx = (y + rect_height) * width + x + dx
-                                if (pixel_idx >= len(binary_pixels) or 
-                                    binary_pixels[pixel_idx] != 0 or
+                                if (pixel_idx >= len(smoothed_pixels) or 
+                                    smoothed_pixels[pixel_idx] != 0 or
                                     processed[y + rect_height][x + dx]):
                                     can_expand_height = False
                                     break
@@ -249,7 +341,7 @@ def image_to_svg_with_color_detection(image_path, output_path, threshold=128):
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(svg_content)
             
-            return True, "Success (Color Detection)"
+            return True, "Success (Color Detection - Smoothed)"
             
     except Exception as e:
         return False, f"Error: {str(e)}"

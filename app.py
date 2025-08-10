@@ -5,6 +5,7 @@ from PIL import Image, ImageOps
 import tempfile
 import uuid
 from werkzeug.utils import secure_filename
+from collections import Counter
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-this-in-production')
@@ -34,10 +35,36 @@ def find_potrace():
             continue
     return None
 
-def image_to_svg_simple(image_path, output_path, threshold=128):
+def is_mostly_black_and_white(image_path, threshold=0.9):
     """
-    Fallback SVG conversion using only PIL (no external dependencies)
-    Creates a pixelated but functional SVG
+    Check if image is mostly black and white (grayscale)
+    Returns True if it's already good for the existing algorithm
+    """
+    try:
+        with Image.open(image_path) as img:
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Sample some pixels to check if they're grayscale
+            pixels = list(img.getdata())
+            grayscale_count = 0
+            total_pixels = len(pixels)
+            
+            # Check every 10th pixel for performance
+            for i in range(0, total_pixels, 10):
+                pixel = pixels[i]
+                # Check if R, G, B values are very close (indicating grayscale)
+                if abs(pixel[0] - pixel[1]) < 10 and abs(pixel[1] - pixel[2]) < 10 and abs(pixel[0] - pixel[2]) < 10:
+                    grayscale_count += 1
+            
+            grayscale_ratio = grayscale_count / (total_pixels // 10)
+            return grayscale_ratio >= threshold
+    except:
+        return False
+
+def image_to_svg_simple_original(image_path, output_path, threshold=128):
+    """
+    Original function - completely unchanged for B&W images!
     """
     try:
         with Image.open(image_path) as img:
@@ -117,13 +144,119 @@ def image_to_svg_simple(image_path, output_path, threshold=128):
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(svg_content)
             
-            return True, "Success"
+            return True, "Success (B&W Optimized)"
+    except Exception as e:
+        return False, f"Error: {str(e)}"
+
+def image_to_svg_with_color_detection(image_path, output_path, threshold=128):
+    """
+    Enhanced version that uses original logic for B&W images,
+    and color detection for colored images
+    """
+    try:
+        # First, check if it's mostly black and white
+        if is_mostly_black_and_white(image_path):
+            # Use original algorithm (unchanged!)
+            return image_to_svg_simple_original(image_path, output_path, threshold)
+        
+        # For colored images, use color detection
+        with Image.open(image_path) as img:
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            max_size = (600, 600)
+            original_size = img.size
+            if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
+                img.thumbnail(max_size, Image.Resampling.LANCZOS)
+            
+            width, height = img.size
+            scale_x = original_size[0] / width
+            scale_y = original_size[1] / height
+            
+            pixels = list(img.getdata())
+            
+            # Find background color by checking corners
+            corner_pixels = [
+                pixels[0],  # top-left
+                pixels[width-1],  # top-right  
+                pixels[width*(height-1)],  # bottom-left
+                pixels[width*height-1]  # bottom-right
+            ]
+            
+            # Most common corner color is likely background
+            corner_counts = Counter(corner_pixels)
+            background_color = corner_counts.most_common(1)[0][0]
+            
+            # Create binary mask based on color distance from background
+            binary_pixels = []
+            for pixel in pixels:
+                # Calculate color distance
+                distance = ((pixel[0] - background_color[0])**2 + 
+                           (pixel[1] - background_color[1])**2 + 
+                           (pixel[2] - background_color[2])**2)**0.5
+                
+                if distance > 40:  # Adjust this if needed
+                    binary_pixels.append(0)  # Foreground (black in SVG)
+                else:
+                    binary_pixels.append(255)  # Background (white in SVG)
+            
+            # Use same rectangle optimization code
+            svg_content = f'''<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="{original_size[0]}" height="{original_size[1]}" viewBox="0 0 {original_size[0]} {original_size[1]}">
+<rect width="{original_size[0]}" height="{original_size[1]}" fill="white"/>
+<g transform="scale({scale_x:.2f},{scale_y:.2f})">
+'''
+            
+            processed = [[False] * width for _ in range(height)]
+            
+            for y in range(height):
+                for x in range(width):
+                    pixel_index = y * width + x
+                    if (pixel_index < len(binary_pixels) and 
+                        binary_pixels[pixel_index] == 0 and 
+                        not processed[y][x]):
+                        
+                        rect_width = 1
+                        rect_height = 1
+                        
+                        while (x + rect_width < width and 
+                               (y * width + x + rect_width) < len(binary_pixels) and
+                               binary_pixels[y * width + x + rect_width] == 0 and
+                               not processed[y][x + rect_width]):
+                            rect_width += 1
+                        
+                        can_expand_height = True
+                        while (y + rect_height < height and can_expand_height):
+                            for dx in range(rect_width):
+                                pixel_idx = (y + rect_height) * width + x + dx
+                                if (pixel_idx >= len(binary_pixels) or 
+                                    binary_pixels[pixel_idx] != 0 or
+                                    processed[y + rect_height][x + dx]):
+                                    can_expand_height = False
+                                    break
+                            if can_expand_height:
+                                rect_height += 1
+                        
+                        for dy in range(rect_height):
+                            for dx in range(rect_width):
+                                if y + dy < height and x + dx < width:
+                                    processed[y + dy][x + dx] = True
+                        
+                        svg_content += f'<rect x="{x}" y="{y}" width="{rect_width}" height="{rect_height}" fill="black"/>\n'
+            
+            svg_content += '</g></svg>'
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(svg_content)
+            
+            return True, "Success (Color Detection)"
+            
     except Exception as e:
         return False, f"Error: {str(e)}"
 
 def convert_image_to_svg(image_path, output_path):
     """
-    Try potrace first, fall back to PIL-based conversion
+    Try potrace first, fall back to enhanced PIL-based conversion
     """
     potrace_path = find_potrace()
     
@@ -150,8 +283,8 @@ def convert_image_to_svg(image_path, output_path):
         except Exception as e:
             print(f"Potrace failed, falling back to PIL: {e}")
     
-    # Fall back to PIL-based conversion
-    return image_to_svg_simple(image_path, output_path)
+    # Fall back to enhanced PIL-based conversion
+    return image_to_svg_with_color_detection(image_path, output_path)
 
 @app.route('/')
 def index():
@@ -212,7 +345,7 @@ def upload_file():
         flash(f'Upload failed: {str(e)}')
         return redirect(url_for('index'))
 
-# Updated HTML template with form reset functionality
+# Your existing beautiful HTML template
 TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -425,18 +558,6 @@ TEMPLATE = '''
             font-weight: 600;
         }
         
-        .success-message {
-            display: none;
-            background: rgba(34, 197, 94, 0.1);
-            border: 1px solid rgba(34, 197, 94, 0.3);
-            color: #16a34a;
-            padding: 15px 20px;
-            border-radius: 15px;
-            margin-bottom: 30px;
-            font-weight: 600;
-            text-align: center;
-        }
-        
         .spinner {
             display: inline-block;
             width: 20px;
@@ -475,10 +596,6 @@ TEMPLATE = '''
                 {% endif %}
             {% endwith %}
             
-            <div class="success-message" id="successMessage">
-                ✅ Conversion successful! Download started. You can upload another file now.
-            </div>
-            
             <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data">
                 <div class="upload-area" id="dropZone" onclick="document.getElementById('fileInput').click()">
                     <div class="upload-icon">📁</div>
@@ -501,27 +618,6 @@ TEMPLATE = '''
         const filePreview = document.getElementById('filePreview');
         const convertBtn = document.getElementById('convertBtn');
         const form = document.getElementById('uploadForm');
-        const successMessage = document.getElementById('successMessage');
-        
-        let originalButtonText = '🚀 Convert to SVG';
-        
-        function resetForm() {
-            // Reset form
-            form.reset();
-            
-            // Hide file preview
-            filePreview.style.display = 'none';
-            filePreview.textContent = '';
-            
-            // Reset button
-            convertBtn.innerHTML = originalButtonText;
-            convertBtn.disabled = false;
-            
-            // Hide success message after a delay
-            setTimeout(() => {
-                successMessage.style.display = 'none';
-            }, 4000);
-        }
         
         fileInput.addEventListener('change', (e) => {
             if (e.target.files[0]) {
@@ -551,32 +647,9 @@ TEMPLATE = '''
             }
         });
         
-        form.addEventListener('submit', (e) => {
-            // Show loading state
+        form.addEventListener('submit', () => {
             convertBtn.innerHTML = '<div class="spinner"></div>Converting...';
             convertBtn.disabled = true;
-            
-            // Set a timer to reset the form after download should have started
-            // This is a reasonable assumption since file downloads typically start quickly
-            setTimeout(() => {
-                // Show success message
-                successMessage.style.display = 'block';
-                
-                // Reset form after a short delay
-                setTimeout(resetForm, 1000);
-            }, 2000); // Wait 2 seconds for download to start
-        });
-        
-        // Alternative approach: detect when user clicks back to the page
-        // This handles cases where the download takes longer
-        document.addEventListener('visibilitychange', () => {
-            if (!document.hidden && convertBtn.disabled) {
-                // User came back to the page, likely after download
-                setTimeout(() => {
-                    successMessage.style.display = 'block';
-                    setTimeout(resetForm, 1000);
-                }, 500);
-            }
         });
     </script>
 </body>

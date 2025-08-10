@@ -260,8 +260,8 @@ def convert_image_to_svg(image_path, output_path):
     """
     potrace_path = find_potrace()
     
-    # Try potrace if available (best quality)
-    if potrace_path:
+    # Try potrace if available (best quality) - but only for B&W images
+    if potrace_path and is_mostly_black_and_white(image_path):
         try:
             temp_dir = tempfile.gettempdir()
             temp_pbm = os.path.join(temp_dir, f"temp_{uuid.uuid4()}.pbm")
@@ -279,11 +279,11 @@ def convert_image_to_svg(image_path, output_path):
                 os.remove(temp_pbm)
             
             if result.returncode == 0:
-                return True, "Success (High Quality)"
+                return True, "Success (High Quality - Potrace)"
         except Exception as e:
             print(f"Potrace failed, falling back to PIL: {e}")
     
-    # Fall back to enhanced PIL-based conversion
+    # Fall back to enhanced PIL-based conversion (handles both B&W and colored images)
     return image_to_svg_with_color_detection(image_path, output_path)
 
 @app.route('/')
